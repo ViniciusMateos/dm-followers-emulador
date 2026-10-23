@@ -43,17 +43,22 @@ MENSAGENS = [
 ]
 MARCA = "brechoquasenadaa"     # âncora da verificação dupla (está em TODAS as variações)
 
-# knobs do modo "padrao" do antigo (perfis.json) + o N da 1ª vez. O backend manda os do modo
-# escolhido em params; o que não vier usa estes.
+# MODO (20/10/2026 — reformulado pro emulador). O backend manda os campos do modo escolhido em
+# params; o que não vier usa estes. 0 desliga limite/pausa.
 PADRAO = {
-    "delay_dm": (5, 20),            # entre uma pessoa e outra
-    "delay_acao_ui": (1.5, 4.0),    # dwell ao abrir perfil / conversa
-    "pausa_longa_cada": 0,          # 0 = sem pausa longa
-    "pausa_longa": (120, 300),
-    "max_dms_por_run": 0,           # 0 = todos os novos
-    "humanizar": True,              # a cada ~pausa_cada DMs, navega no feed e volta
-    "pausa_cada": 8,
+    "max_dms_por_conta": 10,        # por run, contando só DM que SAIU
+    "max_dms_hora": 10,             # janela rolante, pelos horários do dms_feitos.json
+    "max_dms_dia": 30,              # (a segue14 tomou "Falha ao enviar" com 16 DMs em ~20 min)
     "primeira_vez_n": 20,           # 1ª vez da conta: só os N mais recentes
+    "idade_max_dias": 7,            # follow mais velho que isso não recebe (vira "visto")
+    "ordem": "recentes",            # 'recentes' (quem acabou de seguir primeiro) | 'antigos'
+    "delay_dm": (20, 60),           # entre uma pessoa e outra
+    "delay_acao_ui": (1.5, 4.0),    # dwell ao abrir perfil / conversa
+    "pausa_longa_cada": 5,          # a cada N DMs ENVIADAS
+    "pausa_longa": (180, 420),
+    "pausa_humana_cada": 6,         # a cada ~N pessoas, navega no feed e volta
+    "resfriar_conta_h": 24,         # depois de falha/soft-block/bloqueio, a conta descansa N horas
+    "mensagens": [],                # vazio = as 5 do código; toda mensagem TEM que citar o @ da marca
 }
 MAX_FALHAS_SEGUIDAS = 6             # igual ao antigo: 6 conversas que não abrem = soft-block de DM
 
@@ -152,8 +157,15 @@ def _dormir(seg, motivo, log, parar=None):
         time.sleep(min(1.0, falta))
 
 
-def _montar_mensagem(user):
-    txt = random.choice(MENSAGENS).replace("{username}", user)
+def _mensagens_validas(lista):
+    """Mensagens do modo que citam a marca (sem ela a verificação dupla `ja_tem_marca` não funciona
+    e a pessoa receberia de novo). Nenhuma válida → as 5 do código."""
+    boas = [str(m) for m in (lista or []) if MARCA in str(m).lower()]
+    return boas or MENSAGENS
+
+
+def _montar_mensagem(user, mensagens=None):
+    txt = random.choice(mensagens or MENSAGENS).replace("{username}", user)
     while True:   # spintax {a|b|c}
         m = re.search(r"\{([^{}]*\|[^{}]*)\}", txt)
         if not m:
@@ -404,7 +416,7 @@ def abrir_conversa(d, user, log):
             bb = _no_por_rotulo(_dump(d), {"enviar mensagem"})
     if not bb:
         _log(log, f"  @{user}: perfil sem botão Mensagem")
-        return "falha"
+        return "sem_botao"
     d.click((bb[0] + bb[2]) // 2, (bb[1] + bb[3]) // 2)
     for _ in range(8):
         _sleep(0.9, 1.3)
@@ -499,21 +511,34 @@ def pausa_humana(d, log, parar=None):
 
 
 # ─────────────────────────────────── orquestração ───────────────────────────────────
-def escolher_alvos(achados, est, conta, primeira_vez_n, log):
-    """Pendentes = não-frota, não enviados/vistos, do MAIS ANTIGO pro mais novo (igual ao antigo).
-    1ª vez da conta (sem estado): só os N mais recentes; o resto vira 'visto' (não recebe)."""
+def escolher_alvos(achados, est, conta, primeira_vez_n, log, idade_max_dias=0, ordem="recentes"):
+    """Pendentes = não-frota, ainda não enviados/vistos. Devolve (alvos, vistos):
+    - follow mais velho que `idade_max_dias` → visto (agradecer 3 semanas depois fica estranho);
+    - 1ª vez da conta (sem NINGUÉM gravado — não basta a conta existir no estado: a segue4 ficou com
+      listas vazias e mandaria pra todo mundo): só os N mais recentes, o resto vira visto;
+    - ordem: 'recentes' (quem acabou de seguir primeiro) ou 'antigos'."""
     frota = _frota(conta)
     novos = {u: a for u, a in achados.items() if not _eh_frota(u, frota)}
-    primeira = conta not in est
+    c = est.get(conta) or {}
+    primeira = not (c.get("enviados") or c.get("vistos"))
     pend = [u for u in novos if not _ja_tratado(est, conta, u)]
-    pend.sort(key=lambda u: -novos[u])            # maior idade (mais antigo) primeiro
+    velhos = []
+    if idade_max_dias:
+        lim = idade_max_dias * 1440
+        velhos = [u for u in pend if novos[u] > lim]
+        pend = [u for u in pend if novos[u] <= lim]
+        if velhos:
+            _log(log, f"{len(velhos)} seguiram há mais de {idade_max_dias} dia(s) — ficam sem DM")
+    pend.sort(key=lambda u: novos[u])            # menor idade = mais recente primeiro
     if primeira and primeira_vez_n and len(pend) > primeira_vez_n:
-        recentes = sorted(pend, key=lambda u: novos[u])[:primeira_vez_n]
-        resto = [u for u in pend if u not in recentes]
+        resto = pend[primeira_vez_n:]
+        pend = pend[:primeira_vez_n]
         _log(log, f"1ª vez desta conta: DM só pros {primeira_vez_n} mais recentes; "
                   f"{len(resto)} mais antigos ficam marcados como vistos (sem DM)")
-        return [u for u in pend if u in recentes], resto
-    return pend, []
+        velhos += resto
+    if ordem == "antigos":
+        pend.reverse()
+    return pend, velhos
 
 
 def processar_dm(d, log, conta, params=None, parar_flag=None, rotulo=""):
@@ -529,18 +554,63 @@ def processar_dm(d, log, conta, params=None, parar_flag=None, rotulo=""):
         return {"ok": False, "motivo": f"erro:{e}", "enviadas": env, "puladas": 0}
 
 
-def _processar_dm(d, log, conta, params=None, parar_flag=None, rotulo=""):
+def _modo(params):
+    """PADRAO + o que veio do modo. Aceita os nomes antigos (modo ainda não migrado)."""
     p = dict(PADRAO)
-    for k, v in (params or {}).items():
+    params = params or {}
+    for k, v in params.items():
         if k in p and v is not None:
-            p[k] = tuple(v) if isinstance(v, list) else v
+            p[k] = tuple(v) if isinstance(v, list) and k != "mensagens" else v
+    if "max_dms_por_conta" not in params and params.get("max_dms_por_run") is not None:
+        p["max_dms_por_conta"] = params["max_dms_por_run"]
+    if "pausa_humana_cada" not in params and "humanizar" in params:
+        p["pausa_humana_cada"] = int(params.get("pausa_cada") or 0) if params.get("humanizar") else 0
+    return p
+
+
+def _enviadas_desde(est, conta, seg):
+    c = (est.get(conta) or {}).get("enviados") or {}
+    lim = time.time() - seg
+    return sum(1 for ts in c.values() if isinstance(ts, (int, float)) and ts >= lim)
+
+
+def _resfriar(est, conta, horas, log, motivo):
+    """Depois de falha/soft-block/bloqueio: a conta descansa `horas` (as próximas runs pulam ela
+    sem abrir nada — antes ela tentava de novo e falhava na hora)."""
+    if not horas:
+        return
+    c = est.setdefault(conta, {"enviados": {}, "vistos": {}})
+    c["pausada_ate"] = time.time() + horas * 3600
+    _estado_salvar(est)
+    _log(log, f"@{conta} vai descansar {horas:g}h ({motivo}) — as próximas runs pulam ela até lá")
+
+
+def _processar_dm(d, log, conta, params=None, parar_flag=None, rotulo=""):
+    p = _modo(params)
     dry = bool((params or {}).get("dry_run"))
     parar = parar_flag or (lambda: False)
     enviadas = puladas = 0
     res = lambda ok, motivo: {"ok": ok, "motivo": motivo, "enviadas": enviadas, "puladas": puladas}
+    mensagens = _mensagens_validas(p["mensagens"])
+    if p["mensagens"] and len(mensagens) < len(p["mensagens"]):
+        _log(log, f"aviso: {len(p['mensagens']) - len(mensagens)} mensagem(ns) do modo sem o "
+                  f"@{MARCA} foram ignoradas (sem ele o bot não reconhece quem já recebeu)")
+    resfriar = float(p["resfriar_conta_h"] or 0)
 
     _log(log, f"Conta: @{conta}")
     est = _estado_carregar()
+    ate = (est.get(conta) or {}).get("pausada_ate") or 0
+    if ate > time.time() and not dry:
+        _log(log, f"@{conta} está descansando até {time.strftime('%d/%m %H:%M', time.localtime(ate))} "
+                  f"(depois de falha/bloqueio) — pulada")
+        return res(True, "resfriando")
+    # limites de hora/dia pelos horários das DMs que já saíram desta conta
+    max_h, max_d = int(p["max_dms_hora"] or 0), int(p["max_dms_dia"] or 0)
+    na_hora, no_dia = _enviadas_desde(est, conta, 3600), _enviadas_desde(est, conta, 86400)
+    if (max_h and na_hora >= max_h) or (max_d and no_dia >= max_d):
+        _log(log, f"@{conta} já mandou {na_hora} DM(s) na última hora e {no_dia} hoje — no limite "
+                  f"do modo, pulada")
+        return res(True, "limite_dia" if (max_d and no_dia >= max_d) else "limite_hora")
     # PRÉ-CHECAGEM de restrição: conta restrita de DM nem mostra o botão "Mensagem" no perfil dos
     # outros → o bot visitava 6 perfis à toa e parava como "soft-block" (segue13, run-380 19/10).
     # O chat do grupo da frota (toda conta tem) mostra o aviso "Não podes enviar mensagens" na hora.
@@ -558,33 +628,41 @@ def _processar_dm(d, log, conta, params=None, parar_flag=None, rotulo=""):
     achados = coletar_novos_seguidores(d, log, parar=parar)
     if parar():
         return res(True, "parado")
-    alvos, vistos = escolher_alvos(achados, est, conta, int(p["primeira_vez_n"] or 0), log)
+    alvos, vistos = escolher_alvos(achados, est, conta, int(p["primeira_vez_n"] or 0), log,
+                                   int(p["idade_max_dias"] or 0), str(p["ordem"] or "recentes"))
     if not dry:
-        # a conta só entra no estado quando alguém é gravado (visto/enviado) — se ela parar antes
-        # (ex.: RESTRITA, segue4 19/10), a regra da 1ª vez (só N recentes) continua valendo depois
+        # a conta só entra no estado quando alguém é gravado (visto/enviado)
         for u in vistos:
             _marcar(est, conta, u, "vistos")
     _log(log, f"{len(achados)} seguidor(es) nas notificações; {len(alvos)} novo(s) pra DM")
-    cap = int(p["max_dms_por_run"] or 0)
-    if cap:
-        alvos = alvos[:cap]
     if not alvos:
         _log(log, "Ainda não tem novos seguidores pra mandar DM.")
         return res(True, "fim")
+    cap = int(p["max_dms_por_conta"] or 0)
     nomes = ", ".join("@" + u for u in alvos[:10]) + (" …" if len(alvos) > 10 else "")
-    _log(log, f"Vão receber DM ({len(alvos)}): {nomes}")
+    _log(log, f"Na fila ({len(alvos)}{f', até {cap} DMs nesta run' if cap else ''}): {nomes}")
 
-    total = len(alvos)
+    total = min(len(alvos), cap) if cap else len(alvos)
     rot = (rotulo + " ") if rotulo else ""
     _log(log, f"[progress] 0 {total} {rot}iniciando")
     falhas = 0
-    desde_pausa, alvo_pausa = 0, int(p["pausa_cada"] or 0)
+    desde_humana, desde_longa = 0, 0
+    alvo_humana = int(p["pausa_humana_cada"] or 0)
+    plc = int(p["pausa_longa_cada"] or 0)
     for i, user in enumerate(alvos, start=1):
         if parar():
             return res(True, "parado")
-        _log(log, f"[progress] {i - 1} {total} {rot}@{user}")
+        # teto da run e limites de hora/dia contam só DM que SAIU (pulado/sem botão não gasta)
+        if cap and enviadas >= cap:
+            _log(log, f"chegou no limite de {cap} DM(s) desta run — o resto fica pra próxima")
+            break
+        if (max_h and na_hora >= max_h) or (max_d and no_dia >= max_d):
+            _log(log, f"chegou no limite do modo ({na_hora}/h, {no_dia}/dia) — o resto fica pra próxima")
+            break
+        _log(log, f"[progress] {min(enviadas, total)} {total} {rot}@{user}")
+        enviou = False
         if not abrir_perfil(d, user, log):
-            falhas += 1
+            falhas += 1                                  # busca falhando em série = sinal de bloqueio
         else:
             _sleep(*p["delay_acao_ui"])                 # dwell no perfil (o "visitar perfil" antigo)
             st = abrir_conversa(d, user, log)
@@ -594,6 +672,8 @@ def _processar_dm(d, log, conta, params=None, parar_flag=None, rotulo=""):
                 voltar_inicio(d)
                 return res(False, "conta_restrita")
             if st != "ok":
+                # inclui "sem_botao": perfil sem "Mensagem" é sinal de a NOSSA conta estar bloqueada
+                # de DM — conta pra parada e NÃO marca a pessoa (quando a conta voltar, ela recebe)
                 falhas += 1
             else:
                 falhas = 0
@@ -604,24 +684,30 @@ def _processar_dm(d, log, conta, params=None, parar_flag=None, rotulo=""):
                     puladas += 1
                 elif dry:
                     _log(log, f"│ [dry] DM → @{user}")
-                    _log(log, f"│       {_montar_mensagem(user)}")
+                    _log(log, f"│       {_montar_mensagem(user, mensagens)}")
                     enviadas += 1
+                    enviou = True
                 else:
                     _sleep(*p["delay_acao_ui"])
-                    texto = _montar_mensagem(user)
+                    texto = _montar_mensagem(user, mensagens)
                     _log(log, f"│ DM → @{user}")
                     r = enviar(d, texto, log)
                     if r.startswith("bloqueio"):
                         _log(log, f"⛔ BLOQUEIO do Instagram — parando o run: {r.split(':', 1)[1]}")
                         voltar_inicio(d)
+                        _resfriar(est, conta, resfriar, log, "bloqueio")
                         return res(False, r)
                     if r == "falha":
                         _log(log, f"! DM pra @{user} NÃO saiu (falha ao enviar) — parando a conta "
                                   f"pra não insistir")
                         voltar_inicio(d)
+                        _resfriar(est, conta, resfriar, log, "falha ao enviar")
                         return res(False, "falha_envio")
                     _marcar(est, conta, user)        # ok ou incerto: marca (não remanda; a marca
                     enviadas += 1                    # na conversa segura duplicata depois)
+                    enviou = True
+                    na_hora += 1
+                    no_dia += 1
                     if r == "incerto":
                         _log(log, f"✓ DM enviada → @{user} (não confirmei o balão na tela)")
                     else:
@@ -632,26 +718,30 @@ def _processar_dm(d, log, conta, params=None, parar_flag=None, rotulo=""):
                 _log(log, f"⛔ BLOQUEIO provável: {falhas} conversas seguidas não abriram (soft-block de "
                           f"DM) — deixa a conta descansar")
                 voltar_inicio(d)
+                _resfriar(est, conta, resfriar, log, "soft-block de DM")
                 return res(False, "softblock_dm")
-        _log(log, f"[progress] {i} {total} {rot}@{user}")
+        _log(log, f"[progress] {min(enviadas, total)} {total} {rot}@{user}")
         voltar_inicio(d)
-        if i == total:
+        if i == len(alvos) or (cap and enviadas >= cap):
             break
-        # ritmo: pausa longa a cada N, senão delay entre perfis; humanização a cada ~pausa_cada
-        plc = int(p["pausa_longa_cada"] or 0)
-        if plc and enviadas and enviadas % plc == 0:
-            seg = random.uniform(*p["pausa_longa"])
+        # ritmo: pausa longa a cada N DMs ENVIADAS (pulado não conta), senão o delay entre perfis
+        if enviou:
+            desde_longa += 1
+        if plc and enviou and desde_longa >= plc:
+            seg = random.uniform(*p["pausa_longa"]) if not dry else 1.0
             motivo = "pausa longa"
+            desde_longa = 0
         else:
             seg = random.uniform(*p["delay_dm"]) if not dry else 1.0
             motivo = "entre perfis"
         _log(log, f"dormindo {int(seg)}s ({motivo})")
         if not _dormir(seg, motivo, log, parar):
             return res(True, "parado")
-        desde_pausa += 1
-        if p["humanizar"] and alvo_pausa and desde_pausa >= alvo_pausa and not dry:
+        desde_humana += 1
+        if alvo_humana and desde_humana >= alvo_humana and not dry:
             pausa_humana(d, log, parar)
-            desde_pausa = 0
-            alvo_pausa = random.randint(max(3, int(p["pausa_cada"]) - 2), int(p["pausa_cada"]) + 2)
+            desde_humana = 0
     _log(log, f"[progress] {total} {total} {rot}concluído")
     return res(True, "fim")
+
+
