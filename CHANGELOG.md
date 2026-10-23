@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.1.0] — 2026-10-22
+
+### Adicionado
+- feat: modo do DM reformulado (máximo por conta, limites por hora e por dia, idade máxima do follow, ordem, descanso da conta e mensagens do próprio modo)
+
+### Documentação
+- docs: README com os limites e o descanso do modo
+
 ## [1.0.0] — 2026-10-20
 
 ### Adicionado
