@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.1.1] — 2026-10-27
+
+### Corrigido
+- fix: para a conta na hora quando ela cai no captcha ("confirma que és uma pessoa") — antes gastava 6 tentativas (~4 min) e marcava "soft-block de DM"
+
+### Documentação
+- docs: README com a parada no captcha
+
 ## [1.1.0] — 2026-10-22
 
 ### Adicionado
