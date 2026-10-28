@@ -714,6 +714,13 @@ def _processar_dm(d, log, conta, params=None, parar_flag=None, rotulo=""):
                         _log(log, f"✓ DM enviada → @{user}")
         if falhas:
             _log(log, f"! não consegui abrir conversa com @{user} — pulando ({falhas} seguidas)")
+            # a conta caiu em "Confirma que és uma pessoa"? (segue17 27/10: o captcha tirava a barra de
+            # abas e o bot gastava 6 conversas achando que era soft-block de DM) → para a conta JÁ; a
+            # troca pra próxima conta resolve o desafio (tira a conta do aparelho e avisa)
+            if af.desafio_humano(d):
+                _log(log, f"⛔ @{conta} caiu na verificação humana (\"confirma que és uma pessoa\") — "
+                          f"paro esta conta")
+                return res(False, "desafio_humano")
             if falhas >= MAX_FALHAS_SEGUIDAS:
                 _log(log, f"⛔ BLOQUEIO provável: {falhas} conversas seguidas não abriram (soft-block de "
                           f"DM) — deixa a conta descansar")
