@@ -15,6 +15,8 @@ tocando no app real do Instagram dentro de um emulador Android (MuMu Player) via
    mensagem conta como sinal de bloqueio da nossa conta e a pessoa não é marcada (recebe depois).
 5. **Limites do modo**: máximo por run (só DM que saiu conta), por hora e por dia (pelos horários
    do `dms_feitos.json`). Depois de falha, soft-block ou bloqueio a conta descansa N horas.
+   Conta que cai na **verificação humana** ("confirma que és uma pessoa") é parada na hora — a
+   troca pra próxima conta tira ela do aparelho e avisa.
 6. Pausas humanas entre envios; o histórico fica em `dms_feitos.json` (por conta).
 
 ## Onde roda
